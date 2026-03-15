@@ -3,7 +3,7 @@ name: Kujiman Collector
 on:
   schedule:
     # Every 1 hour
-    - cron: '0 * * * *'
+    - cron: '*/10 * * * *'
   
   # Allow manual trigger from GitHub UI
   workflow_dispatch:
