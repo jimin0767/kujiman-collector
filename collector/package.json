@@ -1,0 +1,13 @@
+{
+  "name": "kujiman-collector",
+  "version": "1.0.0",
+  "description": "Automated data collector for Kujiman Infinite Challenge",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "collect": "node index.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.0"
+  }
+}
