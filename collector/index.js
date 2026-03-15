@@ -118,6 +118,7 @@ async function collectEvent(poolId, eventName) {
         reward_item_name: item.reward_item_name || null,
         reward_item_type: "UR",
         image_url: item.reward_item_cover || null,
+        recovery_price: item.recovery_price ? parseFloat(item.recovery_price) : null,
         updated_at: new Date().toISOString(),
       }));
       const { error: itemErr } = await supabase
