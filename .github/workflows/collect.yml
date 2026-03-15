@@ -2,7 +2,7 @@ name: Kujiman Collector
 
 on:
   schedule:
-    # Every 1 hour
+    # Every 10 minutes
     - cron: '*/10 * * * *'
   
   # Allow manual trigger from GitHub UI
