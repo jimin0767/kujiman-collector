@@ -13,7 +13,7 @@ const SUPABASE_KEY = process.env.SUPABASE_KEY;
 const API_BASE = process.env.API_BASE || "https://api.kujiman.com/api_mini_apps/reward";
 
 // Events to SKIP (too fast, ended, or unreliable)
-const EXCLUDE_POOLS = new Set([922, 974, 735]);
+const EXCLUDE_POOLS = new Set([922, 974, 735, 427, 481, 684, 702, 722, 744, 800, 950]);
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
