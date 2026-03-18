@@ -1,22 +1,40 @@
 // ═══════════════════════════════════════════════════
-// KUJIMAN INFINITE CHALLENGE — Data Collector v4
-// - Auto-discovers ALL events
-// - Fetches from BOTH item_speed AND detail API
-// - Saves UR item lists per event
-// - Excludes specified events
+// KUJIMAN INFINITE CHALLENGE — Data Collector v5
+//
+// - Auto-discovers all active Infinite Challenge events
+// - Fetches mowang (snapshot) + item_speed (UR history + items)
+// - Writes ur_rate, price, ur_item_count to events table
+// - Saves UR item lists with recovery_price
+// - Centralized exclusion list
+// - Stores full API responses in snapshots
 // ═══════════════════════════════════════════════════
 
 import { createClient } from "@supabase/supabase-js";
 
+// ─── Config ───
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_KEY;
 const API_BASE = process.env.API_BASE || "https://api.kujiman.com/api_mini_apps/reward";
 
-// Events to SKIP (too fast, ended, or unreliable)
-const EXCLUDE_POOLS = new Set([922, 974, 735, 427, 481, 684, 702, 722, 744, 800, 950]);
+// ─── Centralized exclusion list (SINGLE SOURCE OF TRUTH) ───
+// Add/remove pools here only. The collector marks them inactive in DB automatically.
+const EXCLUDE_POOLS = new Set([
+  922,  // GK 시리즈 - ended
+  974,  // 원피스 카드 컬렉션 시리즈 2 - 6% UR, too fast
+  735,  // 트레이너즈 아레나 Ⅱ - 3% UR, too fast
+  427,  // 디즈니 클래식 월드
+  481,  // 작은별 시리즈
+  684,  // 미니언즈 데일리 파티
+  702,  // 말랑 친구들
+  722,  // 히든 나와라!! Ⅱ
+  744,  // 별빛의 서약
+  800,  // 다시 시작된 인연
+  950,  // 달콤한 하루
+]);
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
+// ─── Helpers ───
 function unixNow() { return Math.floor(Date.now() / 1000); }
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
@@ -28,7 +46,7 @@ function tryParseTime(timeStr) {
   } catch { return null; }
 }
 
-// ─── API FETCHERS ───
+// ─── API Fetchers ───
 
 async function fetchAllEvents() {
   const url = `${API_BASE}/reward_pool_infinite?order_type=3&infinite_type_id=0&sort=0&time=${unixNow()}&os=4&client_env=h5`;
@@ -49,7 +67,6 @@ async function fetchMowang(poolId) {
   return json.data;
 }
 
-// item_speed with fake high ID → returns all visible UR records in list_second
 async function fetchUrHistory(poolId) {
   const url = `${API_BASE}/reward_pool_infinite_item_speed?reward_pool_id=${poolId}&reward_cur_box_num=1&append_max_num_sort=1&append_item_init=1&append_record=1&record_level=2&list_first_id=9999999999&list_first_item_type=UR&time=${unixNow()}&os=4&client_env=h5`;
   const res = await fetch(url);
@@ -59,7 +76,7 @@ async function fetchUrHistory(poolId) {
   return json.data;
 }
 
-// ─── RECORD TRANSFORMER ───
+// ─── Record Transformer ───
 function toRecord(r, poolId) {
   return {
     id: r.id,
@@ -78,8 +95,8 @@ function toRecord(r, poolId) {
   };
 }
 
-// ─── COLLECT ONE EVENT ───
-async function collectEvent(poolId, eventName) {
+// ─── Collect One Event ───
+async function collectEvent(poolId, eventName, eventMeta) {
   console.log(`── ${eventName} (${poolId}) ──`);
 
   const { data: logEntry } = await supabase
@@ -91,7 +108,7 @@ async function collectEvent(poolId, eventName) {
   let totalFound = 0, totalNew = 0;
 
   try {
-    // ─── 1. Mowang: get max_num_sort ───
+    // ─── 1. Mowang → snapshot (full response) ───
     const mowangData = await fetchMowang(poolId);
     const curMowang = mowangData.cur_mowang || {};
     const maxNumSort = curMowang.max_num_sort || null;
@@ -101,15 +118,15 @@ async function collectEvent(poolId, eventName) {
     await supabase.from("event_snapshots").insert({
       reward_pool_id: poolId,
       max_num_sort: maxNumSort,
-      raw_meta: { cur_mowang: curMowang },
+      raw_meta: mowangData,
     });
 
     await sleep(300);
 
-    // ─── 2. item_speed: get UR history + UR item list ───
+    // ─── 2. item_speed → UR items + win history ───
     const speedData = await fetchUrHistory(poolId);
 
-    // Extract UR item list
+    // Save UR item list with recovery_price
     const rewardItems = (speedData.reward_item || []).filter(i => i.reward_item_type === "UR");
     if (rewardItems.length > 0) {
       const itemRows = rewardItems.map(item => ({
@@ -128,34 +145,32 @@ async function collectEvent(poolId, eventName) {
       else console.log(`  Saved ${itemRows.length} UR items`);
     }
 
-    // Extract UR rate from infinite_rate_arr
+    // Extract UR rate
     const rateArr = speedData.infinite_rate_arr || {};
     const urRateEntry = Object.values(rateArr).find(r => r.reward_item_type === "UR");
-    const urRate = urRateEntry ? urRateEntry.infinite_rate : null;
+    const urRate = urRateEntry?.infinite_rate ? parseFloat(urRateEntry.infinite_rate) : null;
 
-    // Also get max_num_sort from item_speed if available
-    const speedMax = speedData.max_num_sort || null;
-    const bestMax = maxNumSort || speedMax || 0;
+    // ─── 3. Write metadata to events table ───
+    const eventUpdate = { updated_at: new Date().toISOString() };
+    if (urRate !== null) eventUpdate.ur_rate = urRate;
+    if (eventMeta?.reward_price_1) eventUpdate.price = eventMeta.reward_price_1;
+    if (rewardItems.length > 0) eventUpdate.ur_item_count = rewardItems.length;
 
-    // Collect UR records from list_second
-    const listSecond = speedData.append_record?.list_second || [];
-    let allApiRecords = listSecond.filter(r => r.reward_item_type === "UR");
+    await supabase.from("events").update(eventUpdate).eq("reward_pool_id", poolId);
+    console.log(`  Meta: ur_rate=${urRate ?? "?"}%, price=₩${eventMeta?.reward_price_1 ?? "?"}, ur_items=${rewardItems.length}`);
 
-    // Also check list_first for any UR record not in list_second
-    const listFirst = speedData.append_record?.list_first || [];
-    const urFromFirst = (Array.isArray(listFirst) ? listFirst : [])
-      .filter(r => r.reward_item_type === "UR");
+    // ─── 4. Collect UR win records ───
+    const listSecond = (speedData.append_record?.list_second || []).filter(r => r.reward_item_type === "UR");
+    const listFirst = (speedData.append_record?.list_first || []);
+    const urFromFirst = (Array.isArray(listFirst) ? listFirst : []).filter(r => r.reward_item_type === "UR");
 
-    // Merge, dedup by id
-    const allRaw = [...allApiRecords, ...urFromFirst];
     const seen = new Set();
     const deduped = [];
-    for (const r of allRaw) {
+    for (const r of [...listSecond, ...urFromFirst]) {
       if (r.id && !seen.has(r.id)) { seen.add(r.id); deduped.push(r); }
     }
 
-    console.log(`  UR from API: ${deduped.length} (list_second: ${allApiRecords.length}, list_first: ${urFromFirst.length})`);
-
+    console.log(`  UR records: ${deduped.length} (second: ${listSecond.length}, first: ${urFromFirst.length})`);
     totalFound = deduped.length;
 
     if (deduped.length > 0) {
@@ -168,7 +183,6 @@ async function collectEvent(poolId, eventName) {
       const { error: upsertErr } = await supabase
         .from("win_records")
         .upsert(records, { onConflict: "id", ignoreDuplicates: true });
-
       if (upsertErr) throw upsertErr;
 
       if (totalNew > 0) {
@@ -180,12 +194,6 @@ async function collectEvent(poolId, eventName) {
       }
     } else {
       console.log("  No UR records in API");
-    }
-
-    // Update event metadata with UR rate
-    if (urRate) {
-      await supabase.from("events").update({ updated_at: new Date().toISOString() })
-        .eq("reward_pool_id", poolId);
     }
 
     if (logId) {
@@ -204,51 +212,52 @@ async function collectEvent(poolId, eventName) {
   }
 }
 
-// ─── MAIN ───
+// ─── Main ───
 async function main() {
   console.log("╔═══════════════════════════════════════════════╗");
-  console.log("║  KUJIMAN COLLECTOR v4                         ║");
+  console.log("║  KUJIMAN COLLECTOR v5                         ║");
   console.log(`║  ${new Date().toISOString()}                  ║`);
+  console.log(`║  Excluded pools: ${EXCLUDE_POOLS.size}                       ║`);
   console.log("╚═══════════════════════════════════════════════╝\n");
 
   if (!SUPABASE_URL || !SUPABASE_KEY) { console.error("Missing env!"); process.exit(1); }
 
-  // Discover events
   const allEvents = await fetchAllEvents();
   const active = allEvents.filter(e => e.status === 1 && !EXCLUDE_POOLS.has(e.id));
   console.log(`Found ${allEvents.length} total, ${active.length} active (${EXCLUDE_POOLS.size} excluded)\n`);
 
-  // Register events
+  // Register active events (with price from discovery API)
   const eventRows = active.map(e => ({
     reward_pool_id: e.id,
     event_name: e.reward_pool_name,
     is_active: true,
+    price: e.reward_price_1 || null,
     updated_at: new Date().toISOString(),
   }));
   if (eventRows.length > 0) {
     await supabase.from("events").upsert(eventRows, { onConflict: "reward_pool_id" });
   }
 
-  // Mark excluded events as inactive
-  for (const id of EXCLUDE_POOLS) {
-    await supabase.from("events").update({ is_active: false, updated_at: new Date().toISOString() })
-      .eq("reward_pool_id", id);
+  // Mark all excluded pools inactive (derived from EXCLUDE_POOLS)
+  if (EXCLUDE_POOLS.size > 0) {
+    await supabase.from("events")
+      .update({ is_active: false, updated_at: new Date().toISOString() })
+      .in("reward_pool_id", [...EXCLUDE_POOLS]);
   }
 
   // Collect each
   let collected = 0;
   for (const event of active) {
-    await collectEvent(event.id, event.reward_pool_name);
+    await collectEvent(event.id, event.reward_pool_name, event);
     collected++;
     await sleep(600);
   }
 
-  // Summary
   const { count } = await supabase.from("win_records").select("*", { count: "exact", head: true });
   const { count: itemCount } = await supabase.from("items").select("*", { count: "exact", head: true });
 
   console.log(`\n╔═══════════════════════════════════════════════╗`);
-  console.log(`║  DONE — ${collected} events`);
+  console.log(`║  DONE — ${collected} events collected`);
   console.log(`║  Win records: ${count || 0} | UR items: ${itemCount || 0}`);
   console.log(`╚═══════════════════════════════════════════════╝`);
 }
