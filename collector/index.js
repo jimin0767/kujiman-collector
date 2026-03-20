@@ -238,11 +238,24 @@ async function main() {
     await supabase.from("events").upsert(eventRows, { onConflict: "reward_pool_id" });
   }
 
-  // Mark all excluded pools inactive (derived from EXCLUDE_POOLS)
+  // Mark excluded pools inactive
   if (EXCLUDE_POOLS.size > 0) {
     await supabase.from("events")
       .update({ is_active: false, updated_at: new Date().toISOString() })
       .in("reward_pool_id", [...EXCLUDE_POOLS]);
+  }
+
+  // Mark ended events inactive (not in API response anymore)
+  const allApiIds = new Set(allEvents.map(e => e.id));
+  const { data: dbEvents } = await supabase.from("events").select("reward_pool_id").eq("is_active", true);
+  const endedIds = (dbEvents || [])
+    .map(e => e.reward_pool_id)
+    .filter(id => !allApiIds.has(id) && !EXCLUDE_POOLS.has(id));
+  if (endedIds.length > 0) {
+    await supabase.from("events")
+      .update({ is_active: false, updated_at: new Date().toISOString() })
+      .in("reward_pool_id", endedIds);
+    console.log(`Marked ${endedIds.length} ended events inactive: ${endedIds.join(", ")}`);
   }
 
   // Collect each
